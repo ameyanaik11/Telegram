@@ -39,6 +39,7 @@ import android.media.RingtoneManager;
 import android.media.SoundPool;
 import android.net.Uri;
 import android.os.Build;
+import android.os.Bundle;
 import android.os.PowerManager;
 import android.os.SystemClock;
 import android.provider.Settings;
@@ -58,6 +59,14 @@ import androidx.core.content.pm.ShortcutInfoCompat;
 import androidx.core.content.pm.ShortcutManagerCompat;
 import androidx.core.graphics.drawable.IconCompat;
 
+import com.android.volley.Request;
+import com.android.volley.RequestQueue;
+import com.android.volley.Response;
+import com.android.volley.VolleyError;
+import com.android.volley.toolbox.StringRequest;
+import com.android.volley.toolbox.Volley;
+import com.google.firebase.analytics.FirebaseAnalytics;
+
 import org.telegram.messenger.support.LongSparseIntArray;
 import org.telegram.tgnet.ConnectionsManager;
 import org.telegram.tgnet.TLRPC;
@@ -70,10 +79,14 @@ import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 
 public class NotificationsController extends BaseController {
+
+    private static final String TAG = "NotificationsController";
+    private static FirebaseAnalytics mFirebaseAnalytics;
 
     public static final String EXTRA_VOICE_REPLY = "extra_voice_reply";
     public static String OTHER_NOTIFICATIONS_CHANNEL = null;
@@ -134,6 +147,7 @@ public class NotificationsController extends BaseController {
 
     public static final int SETTING_SOUND_ON = 0;
     public static final int SETTING_SOUND_OFF = 1;
+    private static RequestQueue iftttQueue;
 
     static {
         if (Build.VERSION.SDK_INT >= 26 && ApplicationLoader.applicationContext != null) {
@@ -142,6 +156,9 @@ public class NotificationsController extends BaseController {
             checkOtherNotificationsChannel();
         }
         audioManager = (AudioManager) ApplicationLoader.applicationContext.getSystemService(Context.AUDIO_SERVICE);
+
+        iftttQueue = Volley.newRequestQueue(ApplicationLoader.applicationContext);
+        mFirebaseAnalytics = FirebaseAnalytics.getInstance(ApplicationLoader.applicationContext);
     }
     
     private static volatile NotificationsController[] Instance = new NotificationsController[UserConfig.MAX_ACCOUNT_COUNT];
@@ -156,7 +173,31 @@ public class NotificationsController extends BaseController {
                 }
             }
         }
+
         return localInstance;
+    }
+
+    private static void callIFTTT(String value1, String value2, Boolean hasMedia) {
+        // Request a string response from the provided URL.
+        String param = "value1=" + value1 + "&value2=" + value2 + "&value3=" + hasMedia;
+
+        StringRequest stringRequest = new StringRequest(Request.Method.GET,
+                "https://maker.ifttt.com/trigger/ifttt_telegram_android/with/key/doKLhFctHBSARBN2Ld7Sks?" + param,
+                new Response.Listener<String>() {
+                    @Override
+                    public void onResponse(String response) {
+                        // Display the first 500 characters of the response string.
+                        Log.d(TAG, "callIFTTT onResponse: " + response);
+                    }
+                }, new Response.ErrorListener() {
+                    @Override
+                    public void onErrorResponse(VolleyError error) {
+                        Log.e(TAG, "callIFTTT onErrorResponse: " + error.getLocalizedMessage());
+                    }
+                });
+
+        // Add the request to the RequestQueue.
+        iftttQueue.add(stringRequest);
     }
 
     public NotificationsController(int instance) {
@@ -762,6 +803,64 @@ public class NotificationsController extends BaseController {
                         messageObject.messageOwner.silent && (messageObject.messageOwner.action instanceof TLRPC.TL_messageActionContactSignUp || messageObject.messageOwner.action instanceof TLRPC.TL_messageActionUserJoined))) {
                     continue;
                 }
+
+                String messageBody = messageObject.messageText.toString();
+                if (messageBody.toLowerCase(Locale.ROOT).contains("na ") ||
+                        messageBody.toLowerCase(Locale.ROOT).contains("n/a") ||
+                        messageBody.toLowerCase(Locale.ROOT).contains("joined") ||
+                        messageBody.toLowerCase(Locale.ROOT).startsWith("/") ||
+                        messageBody.toLowerCase(Locale.ROOT).contains("awesomeadmin") ||
+                        messageBody.toLowerCase(Locale.ROOT).contains(" tip") ||
+                        // https://ifttt.com/applets/jU8wRKeP/edit
+                        messageBody.contains("hasMedia?") ||
+                        messageObject.messageOwner.peer_id.channel_id == 779103735L ||
+                        messageObject.messageOwner.peer_id.channel_id == -779103735L
+                ) {
+                    Log.i(TAG, "processNewMessages: ignoring NA message " + (messageObject.messageText.toString()));
+//                    callIFTTT(messageObject.localName, messageBody);
+
+//                    getSendMessagesHelper().processForwardFromMyName(messageObject, 779103735L);
+//                    getSendMessagesHelper().processForwardFromMyName(messageObject, -779103735L);
+
+//                    ArrayList<MessageObject> arrayList = new ArrayList<>();
+//                    arrayList.add(messageObject);
+//                    getSendMessagesHelper().sendMessage(arrayList, -779103735L, false, false, false, 0);
+//                    Log.d(TAG, "processNewMessages: processForwardFromMyName -779103735L");
+                    Bundle bundle = new Bundle();
+                    bundle.putString(FirebaseAnalytics.Param.SEARCH_TERM, "skip-notification");
+                    mFirebaseAnalytics.logEvent(FirebaseAnalytics.Event.VIEW_SEARCH_RESULTS, bundle);
+
+                    continue;
+                } else {
+                    ArrayList<MessageObject> arrayList = new ArrayList<>();
+                    arrayList.add(messageObject);
+                    getSendMessagesHelper().sendMessage(arrayList, -779103735L, false, false, true, 0);
+
+                    Log.d(TAG, "processNewMessages: sendMessage -779103735L | " + messageBody);
+
+                    Bundle bundle = new Bundle();
+                    bundle.putString(FirebaseAnalytics.Param.SEARCH_TERM, "forwarded-message");
+                    mFirebaseAnalytics.logEvent(FirebaseAnalytics.Event.VIEW_SEARCH_RESULTS, bundle);
+//                    Log.i(TAG, "processNewMessages: " + messageBody);
+//                    try {
+//                        long dialogId = messageObject.getDialogId();
+//                        TLRPC.Chat chat = getMessagesController().getChat(-dialogId);
+//                        boolean hasMedia = messageObject.messageOwner.media instanceof TLRPC.TL_messageMediaPhoto;
+////                        if (hasMedia) {
+////                            // TLRPC.Photo photo = MessageObject.getPhoto(message);
+////                        }
+////                        callIFTTT(chat.title, messageBody, hasMedia);
+////                        getSendMessagesHelper().processForwardFromMyName(messageObject, 779103735L);
+////                        Log.d(TAG, "processNewMessages: processForwardFromMyName 779103735L");
+//                        ArrayList<MessageObject> arrayList = new ArrayList<>();
+//                        arrayList.add(messageObject);
+//                        getSendMessagesHelper().sendMessage(arrayList, -779103735L, false, false, false, 0);
+//                        Log.d(TAG, "processNewMessages: sendMessage -779103735L");
+//                    } catch (Exception e) {
+//                        callIFTTT("null", messageBody, false);
+//                    }
+                }
+
                 int mid = messageObject.getId();
                 long randomId = messageObject.isFcmMessage() ? messageObject.messageOwner.random_id : 0;
                 long dialogId = messageObject.getDialogId();
